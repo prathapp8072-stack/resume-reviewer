@@ -1,25 +1,30 @@
+import re
 import streamlit as st
 import PyPDF2
 import docx
-import os
-from anthropic import Anthropic
 
-# -----------------------------
-# CONFIG
-# -----------------------------
-st.set_page_config(page_title="AI Resume Reviewer", page_icon="📄", layout="centered")
+st.set_page_config(page_title="Resume Reviewer", page_icon="📄", layout="centered")
 
-# Put your Anthropic API key here or set it as an environment variable
-# Option 1: set env var ANTHROPIC_API_KEY before running
-# Option 2: paste it directly below (not recommended for public deployment)
-API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ACTION_VERBS = [
+    "achieved", "built", "created", "designed", "developed", "led", "managed",
+    "improved", "increased", "reduced", "launched", "implemented", "organized",
+    "delivered", "coordinated", "analyzed", "researched", "solved", "optimized",
+    "automated", "negotiated", "trained", "mentored", "presented", "planned"
+]
 
-client = Anthropic(api_key=API_KEY) if API_KEY else None
+SECTION_KEYWORDS = {
+    "Contact Info": ["email", "phone", "linkedin", "@"],
+    "Education": ["education", "university", "college", "degree", "bachelor", "master"],
+    "Experience": ["experience", "work history", "employment"],
+    "Skills": ["skills", "technologies", "tools", "proficient"],
+    "Projects": ["project", "projects"],
+}
+
+WEAK_PHRASES = [
+    "responsible for", "duties included", "worked on", "helped with", "involved in"
+]
 
 
-# -----------------------------
-# TEXT EXTRACTION FUNCTIONS
-# -----------------------------
 def extract_text_from_pdf(file):
     reader = PyPDF2.PdfReader(file)
     text = ""
@@ -30,8 +35,7 @@ def extract_text_from_pdf(file):
 
 def extract_text_from_docx(file):
     document = docx.Document(file)
-    text = "\n".join([para.text for para in document.paragraphs])
-    return text
+    return "\n".join([para.text for para in document.paragraphs])
 
 
 def extract_resume_text(uploaded_file):
@@ -39,51 +43,100 @@ def extract_resume_text(uploaded_file):
         return extract_text_from_pdf(uploaded_file)
     elif uploaded_file.name.endswith(".docx"):
         return extract_text_from_docx(uploaded_file)
+    return None
+
+
+def analyze_resume(text, job_role=""):
+    lower_text = text.lower()
+    word_count = len(text.split())
+
+    score = 0
+    max_score = 10
+    strengths = []
+    weaknesses = []
+    suggestions = []
+
+    if 300 <= word_count <= 900:
+        score += 2
+        strengths.append(f"Good resume length ({word_count} words).")
+    elif word_count < 300:
+        weaknesses.append(f"Resume seems short ({word_count} words). It may lack detail.")
+        suggestions.append("Add more detail about your experience, projects, and skills.")
     else:
-        return None
+        weaknesses.append(f"Resume seems long ({word_count} words). Recruiters often skim quickly.")
+        suggestions.append("Try trimming to the most relevant, impactful points (aim for 1-2 pages).")
+
+    found_sections = []
+    missing_sections = []
+    for section, keywords in SECTION_KEYWORDS.items():
+        if any(kw in lower_text for kw in keywords):
+            found_sections.append(section)
+        else:
+            missing_sections.append(section)
+
+    section_score = round((len(found_sections) / len(SECTION_KEYWORDS)) * 3)
+    score += section_score
+
+    if found_sections:
+        strengths.append(f"Includes key sections: {', '.join(found_sections)}.")
+    if missing_sections:
+        weaknesses.append(f"Missing or unclear sections: {', '.join(missing_sections)}.")
+        suggestions.append(f"Add clear headings for: {', '.join(missing_sections)}.")
+
+    verbs_found = [v for v in ACTION_VERBS if v in lower_text]
+    if len(verbs_found) >= 5:
+        score += 2
+        strengths.append(f"Uses strong action verbs (e.g. {', '.join(verbs_found[:5])}).")
+    elif len(verbs_found) >= 2:
+        score += 1
+        weaknesses.append("Uses some action verbs, but could use more variety.")
+        suggestions.append("Start bullet points with action verbs like 'led', 'built', 'improved'.")
+    else:
+        weaknesses.append("Few or no strong action verbs found.")
+        suggestions.append("Rewrite bullet points to start with action verbs (e.g. 'Developed...', 'Managed...').")
+
+    weak_found = [p for p in WEAK_PHRASES if p in lower_text]
+    if weak_found:
+        weaknesses.append(f"Contains passive/weak phrases: {', '.join(weak_found)}.")
+        suggestions.append("Replace weak phrases with specific achievements and numbers (e.g. 'Reduced costs by 15%').")
+    else:
+        score += 1
+        strengths.append("Avoids generic/passive phrases.")
+
+    has_numbers = bool(re.search(r'\d+%|\d+\+|\$\d+|\d{2,}', text))
+    if has_numbers:
+        score += 2
+        strengths.append("Includes quantifiable results/numbers (great for impact).")
+    else:
+        weaknesses.append("No numbers or measurable results found.")
+        suggestions.append("Add metrics where possible (e.g. 'Increased sales by 20%', 'Managed team of 5').")
+
+    role_match_note = None
+    if job_role:
+        role_words = [w.lower() for w in re.findall(r'\w+', job_role) if len(w) > 3]
+        matched = [w for w in role_words if w in lower_text]
+        missing = [w for w in role_words if w not in lower_text]
+        if role_words:
+            match_pct = round((len(matched) / len(role_words)) * 100)
+            role_match_note = f"Keyword match with '{job_role}': {match_pct}% ({len(matched)}/{len(role_words)} terms found)."
+            if missing:
+                suggestions.append(f"Consider adding these role-related terms if relevant: {', '.join(missing)}.")
+
+    score = min(score, max_score)
+
+    return {
+        "score": score,
+        "max_score": max_score,
+        "word_count": word_count,
+        "strengths": strengths,
+        "weaknesses": weaknesses,
+        "suggestions": suggestions,
+        "role_match_note": role_match_note,
+    }
 
 
-# -----------------------------
-# AI REVIEW FUNCTION
-# -----------------------------
-def review_resume(resume_text, job_role=""):
-    role_context = f"The candidate is targeting a role as: {job_role}." if job_role else ""
-
-    prompt = f"""You are an expert resume reviewer and career coach.
-Review the following resume text and provide feedback in this exact structure:
-
-1. Overall Score (out of 10)
-2. Strengths (3-5 bullet points)
-3. Weaknesses / Areas to Improve (3-5 bullet points)
-4. Formatting & Structure Feedback
-5. Suggested Improvements (specific, actionable)
-6. Missing Keywords (if a target role is given)
-
-{role_context}
-
-Resume:
-\"\"\"
-{resume_text}
-\"\"\"
-"""
-
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1500,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    return message.content[0].text
-
-
-# -----------------------------
-# STREAMLIT UI
-# -----------------------------
-st.title("📄 AI Resume Reviewer")
-st.write("Upload your resume (PDF or DOCX) and get instant AI-powered feedback.")
-
-if not client:
-    st.warning("⚠️ No API key found. Set the ANTHROPIC_API_KEY environment variable before running the app.")
+st.title("📄 Resume Reviewer")
+st.write("Upload your resume (PDF or DOCX) and get instant feedback — no API key needed, everything runs locally.")
 
 job_role = st.text_input("Target job role (optional)", placeholder="e.g. Data Analyst, Software Engineer")
 
@@ -100,10 +153,23 @@ if uploaded_file is not None:
             st.text(resume_text)
 
         if st.button("Review My Resume"):
-            if not client:
-                st.error("API key missing. Cannot run review.")
-            else:
-                with st.spinner("Analyzing your resume..."):
-                    feedback = review_resume(resume_text, job_role)
-                st.subheader("📝 Resume Feedback")
-                st.markdown(feedback)
+            with st.spinner("Analyzing your resume..."):
+                result = analyze_resume(resume_text, job_role)
+
+            st.subheader(f"📝 Overall Score: {result['score']} / {result['max_score']}")
+            st.progress(result['score'] / result['max_score'])
+
+            if result["role_match_note"]:
+                st.info(result["role_match_note"])
+
+            st.markdown("### ✅ Strengths")
+            for s in result["strengths"]:
+                st.markdown(f"- {s}")
+
+            st.markdown("### ⚠️ Weaknesses")
+            for w in result["weaknesses"]:
+                st.markdown(f"- {w}")
+
+            st.markdown("### 💡 Suggestions")
+            for sug in result["suggestions"]:
+                st.markdown(f"- {sug}")
