@@ -2,6 +2,8 @@ import re
 import streamlit as st
 import PyPDF2
 import docx
+from PIL import Image
+import pytesseract
 
 st.set_page_config(page_title="Resume Reviewer", page_icon="📄", layout="centered")
 
@@ -24,6 +26,9 @@ WEAK_PHRASES = [
     "responsible for", "duties included", "worked on", "helped with", "involved in"
 ]
 
+SUPPORTED_TYPES = ["pdf", "docx", "png", "jpg", "jpeg", "webp", "bmp", "tiff"]
+IMAGE_EXTENSIONS = ("png", "jpg", "jpeg", "webp", "bmp", "tiff")
+
 
 def extract_text_from_pdf(file):
     reader = PyPDF2.PdfReader(file)
@@ -38,11 +43,22 @@ def extract_text_from_docx(file):
     return "\n".join([para.text for para in document.paragraphs])
 
 
+def extract_text_from_image(file):
+    image = Image.open(file)
+    # Convert to RGB in case of RGBA/palette images (avoids OCR issues)
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    return pytesseract.image_to_string(image)
+
+
 def extract_resume_text(uploaded_file):
-    if uploaded_file.name.endswith(".pdf"):
+    name = uploaded_file.name.lower()
+    if name.endswith(".pdf"):
         return extract_text_from_pdf(uploaded_file)
-    elif uploaded_file.name.endswith(".docx"):
+    elif name.endswith(".docx"):
         return extract_text_from_docx(uploaded_file)
+    elif name.endswith(IMAGE_EXTENSIONS):
+        return extract_text_from_image(uploaded_file)
     return None
 
 
@@ -136,19 +152,32 @@ def analyze_resume(text, job_role=""):
 
 
 st.title("📄 Resume Reviewer")
-st.write("Upload your resume (PDF or DOCX) and get instant feedback — no API key needed, everything runs locally.")
+st.write("Upload your resume (PDF, DOCX, or an image like JPG/PNG) and get instant feedback — no API key needed, everything runs locally.")
 
 job_role = st.text_input("Target job role (optional)", placeholder="e.g. Data Analyst, Software Engineer")
 
-uploaded_file = st.file_uploader("Upload your resume", type=["pdf", "docx"])
+uploaded_file = st.file_uploader("Upload your resume", type=SUPPORTED_TYPES)
 
 if uploaded_file is not None:
-    with st.spinner("Extracting text from your resume..."):
+    is_image = uploaded_file.name.lower().endswith(IMAGE_EXTENSIONS)
+
+    with st.spinner("Extracting text from your resume..." + (" (running OCR on image)" if is_image else "")):
         resume_text = extract_resume_text(uploaded_file)
 
     if not resume_text or len(resume_text.strip()) < 20:
-        st.error("Could not extract text from this file. Try a different file.")
+        if is_image:
+            st.error(
+                "Could not extract readable text from this image. Try a clearer, higher-resolution "
+                "photo/screenshot with good lighting and minimal skew, or upload a PDF/DOCX instead."
+            )
+        else:
+            st.error("Could not extract text from this file. Try a different file.")
     else:
+        if is_image:
+            st.image(uploaded_file, caption="Uploaded resume image", use_column_width=True)
+            st.caption("⚠️ Text was extracted via OCR — double-check the preview below for accuracy, "
+                       "since OCR can misread some characters.")
+
         with st.expander("View extracted resume text"):
             st.text(resume_text)
 
